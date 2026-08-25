@@ -9,7 +9,7 @@
 
 <title>MusicDJ Studio</title>
 
-<!-- Android Modern Typography -->
+<!-- Android Typography -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -242,7 +242,6 @@ html, body {
     background: var(--color-bg);
 }
 
-/* Sticky Track Label Sidebar */
 .track-labels-rail {
     width: 70px;
     min-width: 70px;
@@ -305,7 +304,6 @@ html, body {
     color: var(--color-text-muted);
 }
 
-/* Horizontal Timeline Scroll Area */
 .timeline-scroll-pane {
     flex: 1;
     overflow-x: auto;
@@ -366,7 +364,6 @@ html, body {
     width: max-content;
 }
 
-/* Sequencer Grid Cell */
 .grid-step-cell {
     width: 48px;
     min-width: 48px;
@@ -554,7 +551,6 @@ html, body {
     color: #fff;
 }
 
-/* Category Filter Tabs */
 .category-filter-bar {
     display: flex;
     gap: 8px;
@@ -588,7 +584,6 @@ html, body {
     font-weight: 700;
 }
 
-/* Sound Points Grid */
 .points-selector-grid {
     flex: 1;
     overflow-y: auto;
@@ -643,7 +638,7 @@ html, body {
 }
 
 /* =========================================================
-   MODAL LIST ITEMS (TEMPLATES, OPTIONS)
+   MODAL LIST ITEMS
 ========================================================= */
 .sheet-list-group {
     display: flex;
@@ -1005,7 +1000,6 @@ var state = {
     renderedAudioBlob: null,
     renderedAudioUrl: null,
     playerAudio: null,
-    analyserNode: null,
     animFrameId: null
 };
 
@@ -1034,35 +1028,40 @@ function getAudioContext() {
     return audioCtx;
 }
 
-// Resilient synthesizer fallback so sound always generates
-function synthesizeSoundBuffer(ctx, track, point) {
-    var sampleRate = ctx.sampleRate;
+// Generates a true zero-amplitude silence buffer (prevents glitch/beep sounds)
+function createSilenceBuffer(ctx) {
+    var sampleRate = ctx ? ctx.sampleRate : 44100;
     var duration = (60 / BASE_BPM) * 4;
-    var buffer = ctx.createBuffer(2, sampleRate * duration, sampleRate);
-    var chL = buffer.getChannelData(0);
-    var chR = buffer.getChannelData(1);
-    
-    var rootPitches = [55, 110, 220, 440];
-    var freq = (rootPitches[track] || 110) * (1 + (point % 8) * 0.12);
+    return (ctx || getAudioContext()).createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+}
 
-    for (var i = 0; i < buffer.length; i++) {
-        var t = i / sampleRate;
-        var env = Math.exp(-t * (track === 0 ? 9 : 2.5));
-        var val = 0;
+// Dedicated Loader for data/silent.ogg (Fallback for empty houses)
+function loadSilentBuffer() {
+    if (audioBufferCache["silent"]) return Promise.resolve(audioBufferCache["silent"]);
 
-        if (track === 0) {
-            val = (Math.sin(2 * Math.PI * (70 / (t * 12 + 1)) * t) + (Math.random() * 2 - 1) * 0.18) * env;
-        } else if (track === 1) {
-            val = (Math.sin(2 * Math.PI * freq * t) + 0.3 * Math.sin(4 * Math.PI * freq * t)) * env;
-        } else if (track === 2) {
-            val = (Math.sin(2 * Math.PI * freq * t) + Math.sin(2 * Math.PI * freq * 1.25 * t) + Math.sin(2 * Math.PI * freq * 1.5 * t)) * 0.33 * env;
-        } else {
-            val = Math.sin(2 * Math.PI * (freq * 2) * t) * Math.sin(2 * Math.PI * 5 * t) * env;
-        }
-        chL[i] = val * 0.65;
-        chR[i] = val * 0.65;
-    }
-    return buffer;
+    var ctx = getAudioContext();
+    var primaryPath = "data/silent.ogg";
+    var fallbackPath = "data/silent.mp3";
+
+    return fetch(primaryPath)
+        .then(function(res){ if (!res.ok) throw new Error(); return res.arrayBuffer(); })
+        .catch(function(){
+            return fetch(fallbackPath).then(function(res){ if (!res.ok) throw new Error(); return res.arrayBuffer(); });
+        })
+        .then(function(ab){
+            return new Promise(function(resolve, reject){
+                ctx.decodeAudioData(ab, function(decoded){
+                    audioBufferCache["silent"] = decoded;
+                    resolve(decoded);
+                }, reject);
+            });
+        })
+        .catch(function(){
+            // Clean silent fallback if file isn't present
+            var silentBuf = createSilenceBuffer(ctx);
+            audioBufferCache["silent"] = silentBuf;
+            return silentBuf;
+        });
 }
 
 function loadSoundBuffer(track, point) {
@@ -1088,9 +1087,10 @@ function loadSoundBuffer(track, point) {
             });
         })
         .catch(function(){
-            var synthBuf = synthesizeSoundBuffer(ctx, track, point);
-            audioBufferCache[key] = synthBuf;
-            return synthBuf;
+            // True silence fallback: no beep/synth noises
+            var silentBuf = createSilenceBuffer(ctx);
+            audioBufferCache[key] = silentBuf;
+            return silentBuf;
         });
 }
 
@@ -1144,6 +1144,33 @@ function playTrackVoice(track, point) {
     }
 }
 
+// Plays data/silent.ogg for an empty house
+function playSilentTrackVoice() {
+    var ctx = getAudioContext();
+    var buf = audioBufferCache["silent"];
+    var rate = state.bpm / BASE_BPM;
+
+    if (buf && state.playing) {
+        var src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.playbackRate.value = rate;
+        src.connect(ctx.destination);
+        src.start(0);
+        activePlayingSources.push(src);
+    } else {
+        loadSilentBuffer().then(function(b){
+            if (b && state.playing) {
+                var s = ctx.createBufferSource();
+                s.buffer = b;
+                s.playbackRate.value = rate;
+                s.connect(ctx.destination);
+                s.start(0);
+                activePlayingSources.push(s);
+            }
+        });
+    }
+}
+
 function stopAllLiveVoices() {
     stopSoundPreview();
     for (var i = 0; i < activePlayingSources.length; i++) {
@@ -1153,7 +1180,7 @@ function stopAllLiveVoices() {
 }
 
 /* =========================================================
-   SEQUENCER ENGINE
+   SEQUENCER ENGINE WITH EMPTY-HOUSE TRICK
 ========================================================= */
 function getLastOccupiedBar() {
     var max = -1;
@@ -1211,9 +1238,19 @@ function sequencerPulse() {
         return;
     }
 
+    // Check if current house is empty
+    var isHouseEmpty = true;
     for (var t = 0; t < TRACK_COUNT; t++) {
         var pt = state.data[t][state.currentStep];
-        if (pt > 0) playTrackVoice(t, pt);
+        if (pt > 0) {
+            isHouseEmpty = false;
+            playTrackVoice(t, pt);
+        }
+    }
+
+    // The Trick: In a house where no track is active, play data/silent.ogg
+    if (isHouseEmpty) {
+        playSilentTrackVoice();
     }
 
     updatePlayheadHighlighter(state.currentStep);
@@ -1624,6 +1661,23 @@ function onScrimClick(e) {
 /* =========================================================
    OFFLINE AUDIO MASTERING & NOW PLAYING SCREEN
 ========================================================= */
+// Assures all samples needed for the song are loaded before rendering (Prevents beep noises)
+function ensureAllSongBuffersLoaded() {
+    var promises = [loadSilentBuffer()];
+    var last = getLastOccupiedBar();
+    if (last === -1) return Promise.resolve();
+
+    for (var s = 0; s <= last; s++) {
+        for (var t = 0; t < TRACK_COUNT; t++) {
+            var pt = state.data[t][s];
+            if (pt > 0) {
+                promises.push(loadSoundBuffer(t, pt));
+            }
+        }
+    }
+    return Promise.all(promises);
+}
+
 function renderAndMasterSong() {
     dismissBottomSheet();
     stopPlaybackState();
@@ -1633,25 +1687,31 @@ function renderAndMasterSong() {
         return;
     }
 
-    displayMasterModal("Mastering Audio...", 30);
+    displayMasterModal("Loading & Mastering Audio...", 20);
 
-    var totalSteps = last + 1;
-    var duration = totalSteps * ((60 / state.bpm) * 4);
-    var sampleRate = 44100;
-    var rate = state.bpm / BASE_BPM;
+    // Pre-cache all sounds in memory first to eliminate any gap or beep artifact
+    ensureAllSongBuffersLoaded().then(function(){
+        displayMasterModal("Rendering Master Audio...", 60);
 
-    setTimeout(function(){
-        try {
-            var OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-            var offlineCtx = new OfflineCtxClass(2, Math.ceil(sampleRate * duration), sampleRate);
+        var totalSteps = last + 1;
+        var duration = totalSteps * ((60 / state.bpm) * 4);
+        var sampleRate = 44100;
+        var rate = state.bpm / BASE_BPM;
 
-            for (var s = 0; s < totalSteps; s++) {
-                var startTime = s * ((60 / state.bpm) * 4);
-                for (var t = 0; t < TRACK_COUNT; t++) {
-                    var pt = state.data[t][s];
-                    if (pt > 0) {
-                        var buf = audioBufferCache[t + "_" + pt] || synthesizeSoundBuffer(offlineCtx, t, pt);
-                        if (buf) {
+        setTimeout(function(){
+            try {
+                var OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+                var offlineCtx = new OfflineCtxClass(2, Math.ceil(sampleRate * duration), sampleRate);
+
+                for (var s = 0; s < totalSteps; s++) {
+                    var startTime = s * ((60 / state.bpm) * 4);
+                    var isHouseEmpty = true;
+
+                    for (var t = 0; t < TRACK_COUNT; t++) {
+                        var pt = state.data[t][s];
+                        if (pt > 0) {
+                            isHouseEmpty = false;
+                            var buf = audioBufferCache[t + "_" + pt] || createSilenceBuffer(offlineCtx);
                             var src = offlineCtx.createBufferSource();
                             src.buffer = buf;
                             src.playbackRate.value = rate;
@@ -1659,26 +1719,36 @@ function renderAndMasterSong() {
                             src.start(startTime);
                         }
                     }
+
+                    // The Trick during Offline Render: In a house where no track is active, render data/silent.ogg
+                    if (isHouseEmpty) {
+                        var sBuf = audioBufferCache["silent"] || createSilenceBuffer(offlineCtx);
+                        var sSrc = offlineCtx.createBufferSource();
+                        sSrc.buffer = sBuf;
+                        sSrc.playbackRate.value = rate;
+                        sSrc.connect(offlineCtx.destination);
+                        sSrc.start(startTime);
+                    }
                 }
+
+                offlineCtx.startRendering().then(function(renderedBuf){
+                    hideMasterModal();
+                    var wavBlob = bufferToWaveBlob(renderedBuf);
+                    if (state.renderedAudioUrl) URL.revokeObjectURL(state.renderedAudioUrl);
+                    state.renderedAudioBlob = wavBlob;
+                    state.renderedAudioUrl = URL.createObjectURL(wavBlob);
+                    openNowPlayingScreen();
+                }).catch(function(){
+                    hideMasterModal();
+                    showAndroidToast("Rendering error");
+                });
+
+            } catch (e) {
+                hideMasterModal();
+                showAndroidToast("Audio Engine Error: " + e.message);
             }
-
-            offlineCtx.startRendering().then(function(renderedBuf){
-                hideMasterModal();
-                var wavBlob = bufferToWaveBlob(renderedBuf);
-                if (state.renderedAudioUrl) URL.revokeObjectURL(state.renderedAudioUrl);
-                state.renderedAudioBlob = wavBlob;
-                state.renderedAudioUrl = URL.createObjectURL(wavBlob);
-                openNowPlayingScreen();
-            }).catch(function(){
-                hideMasterModal();
-                showAndroidToast("Rendering error");
-            });
-
-        } catch (e) {
-            hideMasterModal();
-            showAndroidToast("Audio Engine Error: " + e.message);
-        }
-    }, 40);
+        }, 40);
+    });
 }
 
 function openNowPlayingScreen() {
@@ -2009,10 +2079,13 @@ function bufferToWaveBlob(abuf) {
 }
 
 /* =========================================================
-   APPLICATION INITIALIZATION
+   APPLICATION INITIALIZATION & BACKGROUND PRELOAD
 ========================================================= */
 window.addEventListener("DOMContentLoaded", function() {
     renderComposer();
+    // Warm up the silent track and core preset sounds in background
+    loadSilentBuffer();
+    ensureAllSongBuffersLoaded();
 });
 </script>
 
